@@ -113,9 +113,9 @@ ansible-playbook -i inventory.yml playbook.yml
 
 ### Additional Tools for macOS
 - Homebrew
-- iTerm2
-- Visual Studio Code
 - Docker Desktop
+- Android Studio
+- SDKMAN
 - macOS-specific settings (key repeat, Finder preferences)
 
 ### Additional Features for Remote Setup
