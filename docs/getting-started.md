@@ -9,6 +9,12 @@ This guide will help you set up your development environment using Ansible, whet
 - SSH access (for remote setup)
 - sudo privileges (for local setup)
 
+For macOS, install Ansible first if it is not already available:
+
+```bash
+brew install ansible
+```
+
 ## Installation
 
 1. Install Ansible:
@@ -46,6 +52,7 @@ The macOS setup will configure your development environment with:
 - Visual Studio Code
 - iTerm2
 - Oh My Zsh with Powerlevel10k theme
+- SDKMAN for managing Java tooling
 - Python packages
 - macOS system preferences
 

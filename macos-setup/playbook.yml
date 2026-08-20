@@ -6,32 +6,44 @@
 
   vars:
     ansible_python_interpreter: /usr/bin/python3
+    homebrew_update_enabled: false
+    homebrew_formula_install_enabled: true
+    homebrew_cask_install_enabled: true
+    sdkman_java_versions:
+      - 17.0.20-tem
+      - 21.0.12-tem
+      - 25.0.4-tem
+    sdkman_default_java_version: 21.0.12-tem
     homebrew_packages:
       - git
-      - zsh
+      - git-lfs
+      - bash
       - curl
       - wget
-      - htop
-      - tmux
-      - vim
-      - python3
-      - node  # This installs both Node.js and npm
-      - make
-      - gcc
       - jq
       - tree
       - ripgrep
       - fd
-      - bat
       - fzf
-      - neofetch
-      - openjdk
-      - go
-      - rust
+      - node
+      - pnpm
+      - python
+      - uv
+      - docker
+      - kubectl
+      - helm
+      - hashicorp/tap/terraform
+      - awscli
+      - ansible
+      - k9s
+      - trivy
+      - gitleaks
+      - pre-commit
+      - zsh-autosuggestions
+      - zsh-syntax-highlighting
     homebrew_cask_packages:
       - docker  # Docker Desktop for Mac
-      - visual-studio-code  # VS Code
-      - iterm2  # Better terminal emulator
+      - android-studio
     python_packages:
       - virtualenv
       - flake8
@@ -63,21 +75,29 @@
       register: brew_install
       changed_when: brew_install.rc == 0
 
+    - name: Re-check Homebrew location after install
+      stat:
+        path: /opt/homebrew/bin/brew
+      register: homebrew_binary_m1_after_install
+
+    - name: Re-check Intel Homebrew location after install
+      stat:
+        path: /usr/local/bin/brew
+      register: homebrew_binary_intel_after_install
+
     - name: Add Homebrew to PATH for M1 Mac
-      shell: |
-        echo 'eval "$(/opt/homebrew/bin/brew shellenv)"' >> ~/.zprofile
-        eval "$(/opt/homebrew/bin/brew shellenv)"
-      when: 
-        - not homebrew_installed
-        - homebrew_binary_m1.stat.exists
+      lineinfile:
+        path: ~/.zprofile
+        line: 'eval "$(/opt/homebrew/bin/brew shellenv)"'
+        create: yes
+      when: homebrew_binary_m1_after_install.stat.exists
 
     - name: Add Homebrew to PATH for Intel Mac
-      shell: |
-        echo 'eval "$(/usr/local/bin/brew shellenv)"' >> ~/.zprofile
-        eval "$(/usr/local/bin/brew shellenv)"
-      when: 
-        - not homebrew_installed
-        - homebrew_binary_intel.stat.exists
+      lineinfile:
+        path: ~/.zprofile
+        line: 'eval "$(/usr/local/bin/brew shellenv)"'
+        create: yes
+      when: homebrew_binary_intel_after_install.stat.exists
 
     - name: Update Homebrew (with retry)
       shell: brew update
@@ -87,19 +107,147 @@
       until: brew_update.rc == 0
       ignore_errors: yes
       changed_when: false
+      when: homebrew_update_enabled
+
+    - name: Ensure HashiCorp tap is available
+      community.general.homebrew_tap:
+        name: hashicorp/tap
+        state: present
+      tags:
+        - homebrew
+        - homebrew_formulae
+        - base
+
+    - name: Get installed Homebrew formulae
+      command: brew list --formula
+      register: brew_installed_formulae
+      changed_when: false
+      when: homebrew_formula_install_enabled
+      tags:
+        - homebrew
+        - homebrew_formulae
+        - base
+
+    - name: Calculate missing Homebrew formulae
+      set_fact:
+        missing_homebrew_packages: "{{ homebrew_packages | difference(brew_installed_formulae.stdout_lines) }}"
+      when: homebrew_formula_install_enabled
+      tags:
+        - homebrew
+        - homebrew_formulae
+        - base
+
+    - name: Show missing Homebrew formulae count
+      debug:
+        msg: "Missing formulae: {{ missing_homebrew_packages | length }}"
+      when: homebrew_formula_install_enabled
+      tags:
+        - homebrew
+        - homebrew_formulae
+        - base
+
+    - name: Wait for active Homebrew processes to finish
+      shell: |
+        if pgrep -af '[b]rew (install|upgrade|update|cleanup|link|fetch)' >/dev/null; then
+          exit 1
+        fi
+      register: brew_process_check
+      retries: 24
+      delay: 5
+      until: brew_process_check.rc == 0
+      changed_when: false
+      when: homebrew_formula_install_enabled
+      tags:
+        - homebrew
+        - homebrew_formulae
+        - base
+
+    - name: Clean stale Homebrew lock files when no brew process is active
+      shell: |
+        removed=0
+        if ! pgrep -af '[b]rew (install|upgrade|update|cleanup|link|fetch)' >/dev/null; then
+          for lock_dir in /opt/homebrew/var/homebrew/locks /usr/local/var/homebrew/locks; do
+            if [ -d "$lock_dir" ] && [ "$(ls -A "$lock_dir" 2>/dev/null | wc -l)" -gt 0 ]; then
+              rm -f "$lock_dir"/* || true
+              removed=1
+            fi
+          done
+        fi
+        if [ "$removed" -eq 1 ]; then
+          echo "removed"
+        fi
+      register: brew_lock_cleanup
+      changed_when: "'removed' in brew_lock_cleanup.stdout"
+      when: homebrew_formula_install_enabled
+      tags:
+        - homebrew
+        - homebrew_formulae
+        - base
 
     # Install packages
-    - name: Install common packages with Homebrew
+    - name: Install missing common packages with Homebrew
       community.general.homebrew:
-        name: "{{ homebrew_packages }}"
+        name: "{{ item }}"
         state: present
         update_homebrew: no  # Skip updating again
+      loop: "{{ missing_homebrew_packages }}"
+      register: brew_formula_install_result
+      retries: 4
+      delay: 10
+      until: brew_formula_install_result is succeeded
+      when:
+        - homebrew_formula_install_enabled
+        - missing_homebrew_packages | length > 0
+      tags:
+        - homebrew
+        - homebrew_formulae
+        - base
 
-    - name: Install cask packages with Homebrew
+    - name: Get installed Homebrew casks
+      command: brew list --cask
+      register: brew_installed_casks
+      changed_when: false
+      when: homebrew_cask_install_enabled
+      tags:
+        - homebrew
+        - homebrew_casks
+        - casks
+
+    - name: Calculate missing Homebrew casks
+      set_fact:
+        missing_homebrew_cask_packages: "{{ homebrew_cask_packages | difference(brew_installed_casks.stdout_lines) }}"
+      when: homebrew_cask_install_enabled
+      tags:
+        - homebrew
+        - homebrew_casks
+        - casks
+
+    - name: Show missing Homebrew casks count
+      debug:
+        msg: "Missing casks: {{ missing_homebrew_cask_packages | length }}"
+      when: homebrew_cask_install_enabled
+      tags:
+        - homebrew
+        - homebrew_casks
+        - casks
+
+    - name: Install missing cask packages with Homebrew
       community.general.homebrew_cask:
-        name: "{{ homebrew_cask_packages }}"
+        name: "{{ item }}"
         state: present
         update_homebrew: no  # Skip updating again
+      loop: "{{ missing_homebrew_cask_packages }}"
+      register: brew_cask_install_result
+      retries: 4
+      delay: 10
+      until: brew_cask_install_result is succeeded
+      when:
+        - homebrew_cask_install_enabled
+        - missing_homebrew_cask_packages | length > 0
+      tags:
+        - homebrew
+        - homebrew_casks
+        - casks
 
     # Install Python packages
     - name: Install Python packages
@@ -107,37 +255,213 @@
         name: "{{ python_packages }}"
         state: present
         extra_args: --user
+      tags:
+        - python
+        - shell
+
+    # SDKMAN setup
+    - name: Check if SDKMAN is installed
+      stat:
+        path: ~/.sdkman
+      register: sdkman_installed
+      tags:
+        - sdkman
+        - java
+        - shell
+
+    - name: Ensure modern Bash is installed for SDKMAN
+      community.general.homebrew:
+        name: bash
+        state: present
+        update_homebrew: no
+      tags:
+        - sdkman
+        - java
+        - shell
+
+    - name: Check for Homebrew Bash on Apple Silicon
+      stat:
+        path: /opt/homebrew/bin/bash
+      register: homebrew_bash_m1
+      tags:
+        - sdkman
+        - java
+        - shell
+
+    - name: Check for Homebrew Bash on Intel Mac
+      stat:
+        path: /usr/local/bin/bash
+      register: homebrew_bash_intel
+      tags:
+        - sdkman
+        - java
+        - shell
+
+    - name: Set SDKMAN Bash executable
+      set_fact:
+        sdkman_bash_executable: >-
+          {{ '/opt/homebrew/bin/bash' if homebrew_bash_m1.stat.exists else '/usr/local/bin/bash' if homebrew_bash_intel.stat.exists else '/bin/bash' }}
+      tags:
+        - sdkman
+        - java
+        - shell
+
+    - name: Install SDKMAN
+      shell: curl -s "https://get.sdkman.io" | "{{ sdkman_bash_executable }}"
+      args:
+        creates: ~/.sdkman/bin/sdkman-init.sh
+      when: not sdkman_installed.stat.exists
+      tags:
+        - sdkman
+        - java
+        - shell
+
+    - name: Initialize SDKMAN in Zsh
+      lineinfile:
+        path: ~/.zshrc
+        line: '[[ -s "$HOME/.sdkman/bin/sdkman-init.sh" ]] && source "$HOME/.sdkman/bin/sdkman-init.sh"'
+        create: yes
+        state: present
+      tags:
+        - sdkman
+        - java
+        - shell
+
+    - name: Remove SDKMAN curl max-time limit for large downloads
+      lineinfile:
+        path: ~/.sdkman/etc/config
+        regexp: '^sdkman_curl_max_time='
+        line: 'sdkman_curl_max_time=0'
+      tags:
+        - sdkman
+        - java
+        - shell
+
+    - name: Install Java versions with SDKMAN
+      shell: |
+        if [ -d "$HOME/.sdkman/candidates/java/{{ item }}" ]; then
+          exit 0
+        fi
+        source "$HOME/.sdkman/bin/sdkman-init.sh"
+        sdk install java "{{ item }}" < /dev/null
+      args:
+        executable: /bin/zsh
+      loop: "{{ sdkman_java_versions }}"
+      register: sdkman_java_install
+      changed_when: sdkman_java_install.rc == 0 and 'is already installed' not in sdkman_java_install.stdout
+      tags:
+        - sdkman
+        - java
+        - shell
+
+    - name: Set default Java version with SDKMAN
+      shell: |
+        source "$HOME/.sdkman/bin/sdkman-init.sh"
+        sdk default java "{{ sdkman_default_java_version }}"
+      args:
+        executable: /bin/zsh
+      register: sdkman_java_default
+      changed_when: sdkman_default_java_version in sdkman_java_default.stdout
+      tags:
+        - sdkman
+        - java
+        - shell
 
     # Oh My Zsh setup
     - name: Check if Oh My Zsh is installed
       stat:
         path: ~/.oh-my-zsh
       register: oh_my_zsh_installed
+      tags:
+        - zsh
+        - shell
 
     - name: Install Oh My Zsh
       shell: sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended
       args:
         creates: ~/.oh-my-zsh
       when: not oh_my_zsh_installed.stat.exists
+      tags:
+        - zsh
+        - shell
+
+    - name: Configure Oh My Zsh shell settings
+      blockinfile:
+        path: ~/.zshrc
+        create: yes
+        marker: "# {mark} ANSIBLE MANAGED OH-MY-ZSH"
+        block: |
+          export ZSH="$HOME/.oh-my-zsh"
+          ZSH_THEME="powerlevel10k/powerlevel10k"
+          plugins=(git)
+          source $ZSH/oh-my-zsh.sh
+          if [ -f /opt/homebrew/share/zsh-autosuggestions/zsh-autosuggestions.zsh ]; then
+            source /opt/homebrew/share/zsh-autosuggestions/zsh-autosuggestions.zsh
+          elif [ -f /usr/local/share/zsh-autosuggestions/zsh-autosuggestions.zsh ]; then
+            source /usr/local/share/zsh-autosuggestions/zsh-autosuggestions.zsh
+          fi
+          if [ -f /opt/homebrew/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh ]; then
+            source /opt/homebrew/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
+          elif [ -f /usr/local/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh ]; then
+            source /usr/local/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
+          fi
+      tags:
+        - zsh
+        - shell
+
+    - name: Configure zsh prompt
+      blockinfile:
+        path: ~/.zshrc
+        create: yes
+        marker: "# {mark} ANSIBLE MANAGED ZSH PROMPT"
+        block: |
+          autoload -U colors && colors
+          setopt prompt_subst
+          autoload -Uz add-zsh-hook
+
+          update_prompt() {
+            if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+              branch=$(git branch --show-current 2>/dev/null)
+              if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
+                git_state='%F{red}*%f'
+              else
+                git_state=''
+              fi
+              git_info=" %F{yellow}(${branch})%f${git_state}"
+            else
+              git_info=''
+            fi
+          }
+
+          add-zsh-hook precmd update_prompt
+          PROMPT='%F{cyan}bansikah@%m%f %F{green}%1~%f${git_info} %(?.%f.%F{red}[err:%?]%f)%# '
+      tags:
+        - zsh
+        - shell
+
+    - name: Configure zsh aliases
+      blockinfile:
+        path: ~/.zshrc
+        create: yes
+        marker: "# {mark} ANSIBLE MANAGED ZSH ALIASES"
+        block: |
+          alias ls='ls -G'
+          alias ll='ls -lahG'
+          alias la='ls -A'
+          alias grep='grep --color=auto'
+          alias gs='git status -sb'
+          alias gl='git log --oneline --decorate --graph -20'
+      tags:
+        - zsh
+        - shell
 
     - name: Set Zsh as default shell
       shell: chsh -s $(which zsh)
       changed_when: false
       when: ansible_user_shell != '/bin/zsh'
-
-    # Powerlevel10k theme
-    - name: Clone Powerlevel10k theme
-      git:
-        repo: https://github.com/romkatv/powerlevel10k.git
-        dest: ~/.oh-my-zsh/custom/themes/powerlevel10k
-        depth: 1
-
-    - name: Configure Powerlevel10k theme
-      lineinfile:
-        path: ~/.zshrc
-        regexp: '^ZSH_THEME='
-        line: 'ZSH_THEME="powerlevel10k/powerlevel10k"'
-        create: yes
+      tags:
+        - zsh
+        - shell
 
     # macOS settings
     - name: Configure macOS settings
